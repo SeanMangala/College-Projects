@@ -1,0 +1,377 @@
+# Assignment Two - Data Normalization
+# Due Date: March 28, 2024
+# Tyler & Co.
+# Group Members:
+#   John Thomas Kudavassery
+#   Sean Andrei Mangala
+#   Tyler Moore
+#   Dan Rabinovitch
+#   Sebastian Rielo
+#   Jackson Wolsey
+
+
+# Normalized Tables
+create table if not exists normalized_entity
+(
+    id  bigint auto_increment  primary key not null ,
+    entity_id bigint not null,
+    first_name tinytext not null,
+    middle_name tinytext ,
+    last_name tinytext  not null,
+    partner_id bigint,
+    partner_first_name tinytext,
+    partner_last_name tinytext,
+    has_current_address smallint,
+    current_address_type varchar(1),
+    current_street_address_1 tinytext,
+    current_street_address_2 tinytext,
+    current_address_city tinytext,
+    current_address_province tinytext,
+    current_address_country tinytext,
+    current_address_postal tinytext,
+    last_donation_school tinytext,
+    last_donation_amount bigint,
+    last_donation_date datetime,
+    last_donation_fund bigint,
+    age bigint,
+    birth_date datetime,
+    death_date datetime,
+    is_active smallint
+);
+
+create table if not exists normalized_donations
+(
+  id bigint auto_increment primary key not null,
+  donation_id bigint not null,
+  entity_id bigint  not null,
+  first_name tinytext,
+  last_name tinytext,
+  fund_id bigint,
+  short_code tinytext,
+  amount bigint,
+  donation_date datetime,
+  school_benefit    tinytext
+);
+
+
+# Alter Table
+# Change last_donation_fund to tinytext
+# 24 ms
+alter table normalized_entity
+modify column last_donation_fund tinytext;
+
+# Change age to tinyint
+# 27 ms
+alter table normalized_entity
+modify column age tinyint;
+
+
+# Indexes
+# Index for normalized_entity.entity_id
+create index normalized_entity_entity_id_index_2
+on normalized_entity (entity_id);
+
+# Index for addresses.entity_id
+create index addresses_entity_id_index
+on addresses (entity_id);
+
+# Index for donation.entity_id
+create index donations_entity_id_index
+on donations (entity_id);
+
+# Create unique index on entity_id to prevent
+# inserting duplicate data 114 ms
+create unique index normalized_entity_entity_id_index
+on normalized_entity (entity_id);
+
+# Create unique index on donation_id to prevent
+# inserting duplicate data 70 ms
+create unique index normalized_donations_entity_id_uindex
+on normalized_donations (donation_id);
+
+
+# Procedures
+create
+    definer = root@localhost procedure assignment_two.create_normalized_entity_table()
+begin
+    # Truncate data
+    # 108 ms
+    truncate normalized_entity;
+
+    # Insert entity data into normalized_entity
+    # 233 ms
+    insert into normalized_entity (entity_id, first_name, middle_name, last_name)
+        select id, first_name, middle_name, last_name
+        from entities;
+
+    # Updates partner id
+    # 1 m 41s -> 244 ms
+    update normalized_entity ne
+    inner join partners p on ne.entity_id = p.entity_id
+    set ne.partner_id = p.partner_id
+    where p.is_active = 1;
+
+    # Updates partner first name and last name
+    # 68 ms
+    update normalized_entity ne
+    inner join entities e on ne.partner_id = e.id
+    set ne.partner_first_name = e.first_name,
+        ne.partner_last_name = e.last_name
+    where ne.partner_id is not null;
+
+    # Updates has current address to 1 based on condition
+    # 3 m 13 s -> 240 ms
+    update normalized_entity ne
+    inner join addresses a on ne.entity_id = a.entity_id
+    set ne.has_current_address = if(a.is_active is true and a.address_type != 'K', 1, 0)
+    where 1 = 1;
+
+    # Updates address data to table
+    # 3 m 11 s -> 218 ms
+    update normalized_entity ne
+    inner join addresses a on ne.entity_id = a.entity_id
+    set ne.current_address_type = a.address_type,
+        ne.current_street_address_1 = a.street_1,
+        ne.current_street_address_2 = a.street_2,
+        ne.current_address_city = a.city,
+        ne.current_address_province = a.province,
+        ne.current_address_country = a.country,
+        ne.current_address_postal = a.postal_code
+    where ne.has_current_address is true;
+
+    # Updates last donation school
+    # 4 s 218 ms
+    update normalized_entity ne
+    inner join donations d on ne.entity_id = d.entity_id
+    inner join funds f on d.fund_id = f.id
+    inner join lookup_school ls on f.school_benefit = ls.code
+    set ne.last_donation_school = ls.name
+    where d.created_at = (
+        select max(created_at)
+        from donations
+        where donations.entity_id = ne.entity_id
+        );
+
+    # Update last_donation columns
+    # 502 ms
+    update normalized_entity ne
+    inner join donations d on ne.entity_id = d.entity_id
+    inner join funds f on d.fund_id = f.id
+    set ne.last_donation_amount = d.amount,
+        ne.last_donation_date = d.created_at,
+        ne.last_donation_fund = f.short_code
+    where d.created_at = (
+        select max(created_at)
+        from donations
+        where donations.entity_id = ne.entity_id
+        );
+
+    # Update birth_date, death_date, and is_active
+    # 657 ms
+    update normalized_entity ne
+    inner join entities e on ne.entity_id = e.id
+    set ne.birth_date = e.birth_date,
+        ne.death_date = e.death_date,
+        ne.is_active = e.is_active
+    where 1 = 1;
+
+    # Update age
+    # 72 ms
+    update normalized_entity
+    set age = determine_age(birth_date, death_date)
+    where 1 = 1;
+end;
+# Takes 8 s 527 ms
+call create_normalized_entity_table();
+
+# create normalized_donations table
+create
+    definer = root@localhost procedure assignment_two.addToDonations()
+BEGIN
+    # ensures no duplicate data
+    truncate table normalized_donations;
+
+    # inserts info that is already organized
+    insert into normalized_donations(donation_id, entity_id, fund_id, amount, donation_date)
+        select id, entity_id, fund_id, amount, created_at
+        from donations;
+
+    # adds first name in correlation to the entity id
+    update normalized_donations nd
+        set nd.first_name = (
+            select e.first_name
+            from entities e
+            where nd.entity_id = e.id)
+    where 1 = 1;
+
+    # adds last name in correlation to the entity id
+    update normalized_donations nd
+        set nd.last_name = (
+            select e.last_name
+            from entities e
+            where nd.entity_id = e.id)
+    where 1 = 1;
+
+    # adds short code in correlation to the fund id
+    update normalized_donations nd
+        set nd.short_code = (
+            select f.short_code
+            from funds f
+            where nd.fund_id = f.id)
+    where 1 = 1;
+
+    # adds school benefit in correlation to the fund id
+    update normalized_donations nd
+        set nd.school_benefit = (
+            select f.school_benefit
+            from funds f
+            where nd.fund_id = f.id)
+    where 1 = 1;
+END;
+# Takes 2 s
+call addToDonations();
+
+
+# Functions
+# to_currency
+create
+    definer = root@localhost function assignment_two.to_currency(money bigint) returns decimal(8, 2) deterministic
+begin
+    return round(money, 2) / 100;
+end;
+
+# get_fullname
+create
+    definer = root@localhost function assignment_two.get_fullname(entity_id int) returns varchar(50) deterministic
+BEGIN
+    DECLARE fullName VARCHAR(50);
+    SELECT CONCAT(first_name, ' ', last_name) INTO fullName
+    FROM normalized_entity
+    WHERE id = entity_id;
+    RETURN fullName;
+END;
+
+# get_age
+create function determine_age(birth_date datetime, death_date datetime) returns int
+    deterministic
+    return case
+        when death_date is not null
+            then timestampdiff(year, birth_date, death_date)
+        else
+        timestampdiff(year, birth_date, curdate())
+    end;
+
+
+# Views (Reports Queries)
+# Listing of all DONOR TYPES and the count of those types
+# (use entity table please)
+# Author: Jackson Wolsey
+select record_type,
+       is_active,
+       count(*) as total_entities
+from entities
+group by record_type, is_active
+order by record_type ASC;
+
+# List of all donors that are active and have current address
+# (normalized entity table)
+# Author: Jackson Wolsey
+select entity_id,
+       first_name,
+       last_name,
+       current_address_type,
+       current_street_address_1,
+       current_street_address_2,
+       current_address_city,
+       current_address_province,
+       current_address_country,
+       current_address_postal
+from normalized_entity
+where is_active = 1 and has_current_address = 1
+order by last_name, first_name;
+
+# List of Provinces and the number of active entities that live there
+# (normalized entity table)
+# Author: Jackson Wolsey
+select current_address_province as Province,
+       count(*) as Total_entities
+from normalized_entity
+where has_current_address = 1
+group by Province
+order by Province;
+
+# List of Cities along with provinces and the number of active entities that live there
+# (normalized entity table)
+# Author: John Kudavassery
+SELECT
+    current_address_province AS province,
+    current_address_city AS city,
+    COUNT(*) AS number_of_entities
+FROM
+    normalized_entity
+WHERE
+    is_active = 1 AND
+    current_address_province IS NOT NULL AND
+    current_address_city IS NOT NULL
+GROUP BY
+    province,
+    city
+ORDER BY
+    number_of_entities DESC;
+
+# List of popular donation funds
+# (Normalized donation table)
+# Author: John Kudavassery
+SELECT fund_id,
+       short_code,
+       COUNT(*) AS donation_count,
+       SUM(to_currency(amount)) AS total_donation_amount
+FROM normalized_donations
+GROUP BY fund_id, short_code
+ORDER BY donation_count DESC;
+
+# List of funds that have never had a donation
+# (funds and donations table)
+# Author: Tyler Moore
+select f.id,
+       f.short_code,
+       f.school_benefit
+from funds f
+left join donations d on d.fund_id = f.id
+where d.fund_id is null;
+
+# List of donors with an active email
+# Author: Sebastian Rielo
+SELECT emails.entity_id, normalized_entity.first_name, normalized_entity.last_name, emails.email_address
+FROM normalized_entity, emails
+WHERE emails.is_active = 1 AND emails.entity_id = normalized_entity.entity_id;
+
+# Count of entities that passed away in the last 10 years
+# (normalized donation and entity table)
+# Author: Sean Mangala
+select ne.entity_id,
+       ne.first_name,
+       ne.last_name,
+       death_date,
+       last_donation_date,
+       last_donation_amount,
+       last_donation_fund,
+       nd.school_benefit
+from normalized_entity ne
+inner join normalized_donations nd on ne.entity_id = nd.entity_id
+where year(death_date) between (year(current_date()) - 10) and year(current_date)
+order by death_date desc;
+
+# List of top 10 donor entities
+# (normalized entity and donations table)
+# Author: Dan Rabinovitch
+SELECT * from ( select entity_id,
+       get_fullname(normalized_donations.entity_id),
+       count(*),
+       sum(to_currency(normalized_donations.amount)) as count
+        FROM normalized_donations
+        inner join entities on (normalized_donations.entity_id = entities.id)
+        GROUP BY entity_id
+        ORDER BY count DESC
+        LIMIT 10 ) t
+ORDER BY entity_id;
